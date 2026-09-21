@@ -49,13 +49,16 @@ jobs:
           emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
           disable-animations: true
           script: |
-            set -euo pipefail
+            set -eu
 
             duration='${{ inputs.duration }}'
-            if ! [[ "$duration" =~ ^[0-9]+$ ]] || (( duration < 10 || duration > 330 )); then
-              echo 'Invalid duration. Use a value from 10 to 330 minutes.' >&2
-              exit 1
-            fi
+            case "$duration" in
+              10|20|30|60|90|120|180|240|300|330) ;;
+              *)
+                echo 'Invalid duration. Use a value from 10 to 330 minutes.' >&2
+                exit 1
+                ;;
+            esac
 
             adb wait-for-device
             adb shell settings put global window_animation_scale 0
@@ -71,5 +74,5 @@ jobs:
             tailscale serve status
 
             echo "Keeping the emulator available for ${duration} minutes."
-            trap 'sudo tailscale serve reset || true' EXIT
+            trap 'sudo tailscale serve reset || true' 0
             sleep "$((duration * 60))"
