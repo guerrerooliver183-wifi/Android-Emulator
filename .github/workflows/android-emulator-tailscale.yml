@@ -33,7 +33,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Start Android emulator
+      - name: Connect runner to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          tags: tag:ci
+
+      - name: Start emulator, publish ADB and keep session alive
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
@@ -43,45 +49,27 @@ jobs:
           emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
           disable-animations: true
           script: |
+            set -euo pipefail
+
+            duration='${{ inputs.duration }}'
+            if ! [[ "$duration" =~ ^[0-9]+$ ]] || (( duration < 10 || duration > 330 )); then
+              echo 'Invalid duration. Use a value from 10 to 330 minutes.' >&2
+              exit 1
+            fi
+
             adb wait-for-device
             adb shell settings put global window_animation_scale 0
             adb shell settings put global transition_animation_scale 0
             adb shell settings put global animator_duration_scale 0
 
-      - name: Install and connect Tailscale
-        uses: tailscale/github-action@v4
-        with:
-          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
-          tags: tag:ci
+            adb tcpip 5555
+            adb connect 127.0.0.1:5555 || true
+            adb devices
 
-      - name: Publish emulator ADB over Tailscale Serve
-        shell: bash
-        run: |
-          set -euo pipefail
+            sudo tailscale serve --tcp=5555 tcp://127.0.0.1:5555 --yes
+            echo 'Tailscale Serve status:'
+            tailscale serve status
 
-          adb tcpip 5555
-          adb connect 127.0.0.1:5555 || true
-          adb devices
-
-          sudo tailscale serve --tcp=5555 tcp://127.0.0.1:5555 --yes
-
-          echo 'Tailscale Serve status:'
-          tailscale serve status
-
-      - name: Keep emulator session alive
-        shell: bash
-        run: |
-          set -euo pipefail
-          duration='${{ inputs.duration }}'
-
-          if ! [[ "$duration" =~ ^[0-9]+$ ]] || (( duration < 10 || duration > 330 )); then
-            echo 'Invalid duration. Use a value from 10 to 330 minutes.' >&2
-            exit 1
-          fi
-
-          echo "Keeping the emulator available for ${duration} minutes."
-          sleep "$((duration * 60))"
-
-      - name: Reset Tailscale Serve
-        if: always()
-        run: sudo tailscale serve reset || true
+            echo "Keeping the emulator available for ${duration} minutes."
+            trap 'sudo tailscale serve reset || true' EXIT
+            sleep "$((duration * 60))"
