@@ -1,0 +1,142 @@
+name: Android Emulator via Tailscale Serve
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: 'Duración del emulador (10-330 minutos)'
+        required: true
+        default: '30'
+        type: number
+
+permissions:
+  contents: read
+
+jobs:
+  android-emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    env:
+      DURATION_MINUTES: ${{ inputs.duration_minutes }}
+      ANDROID_HOME: /opt/android-sdk
+      ANDROID_SDK_ROOT: /opt/android-sdk
+      DISPLAY: :99
+
+    steps:
+      - name: Validate duration
+        shell: bash
+        run: |
+          if ! [[ "$DURATION_MINUTES" =~ ^[0-9]+$ ]]; then
+            echo 'La duración debe ser un número entero.'
+            exit 1
+          fi
+          if (( DURATION_MINUTES < 10 || DURATION_MINUTES > 330 )); then
+            echo 'La duración debe estar entre 10 y 330 minutos.'
+            exit 1
+          fi
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            qemu-kvm \
+            xvfb \
+            x11vnc \
+            python3-websockify \
+            novnc \
+            unzip
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          curl -fsSL -o /tmp/commandlinetools.zip \
+            https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip
+          unzip -q /tmp/commandlinetools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
+          mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            'platform-tools' \
+            'emulator' \
+            'platforms;android-35' \
+            'system-images;android-35;google_apis;x86_64'
+
+      - name: Create Android virtual device
+        shell: bash
+        run: |
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
+          echo 'no' | avdmanager create avd \
+            --name github-emulator \
+            --package 'system-images;android-35;google_apis;x86_64' \
+            --device 'pixel_6' \
+            --force
+
+      - name: Start virtual display
+        run: |
+          Xvfb "$DISPLAY" -screen 0 1280x800x24 -ac +extension GLX +render -noreset \
+            > /tmp/xvfb.log 2>&1 &
+          sleep 2
+
+      - name: Start Android emulator
+        shell: bash
+        run: |
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/emulator:$PATH"
+          emulator -avd github-emulator \
+            -no-audio \
+            -no-boot-anim \
+            -gpu swiftshader_indirect \
+            -accel off \
+            -memory 2048 \
+            > /tmp/emulator.log 2>&1 &
+
+          adb wait-for-device
+          timeout 180 bash -c 'until adb shell getprop sys.boot_completed 2>/dev/null | tr -d "\r" | grep -q 1; do sleep 5; done'
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+
+      - name: Start VNC and noVNC web interface
+        shell: bash
+        run: |
+          x11vnc -display "$DISPLAY" -forever -shared -nopw -rfbport 5900 \
+            > /tmp/x11vnc.log 2>&1 &
+          websockify --web=/usr/share/novnc 6080 localhost:5900 \
+            > /tmp/novnc.log 2>&1 &
+          sleep 3
+
+      - name: Connect runner to Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:github-actions
+
+      - name: Publish noVNC with Tailscale Serve
+        shell: bash
+        run: |
+          tailscale serve --bg http://127.0.0.1:6080
+          echo 'Tailscale Serve está activo. La URL aparecerá en los logs de Tailscale.'
+          tailscale serve status
+
+      - name: Keep emulator running
+        shell: bash
+        run: |
+          echo "El emulador permanecerá activo durante $DURATION_MINUTES minutos."
+          sleep "$((DURATION_MINUTES * 60))"
+
+      - name: Show diagnostic logs on failure
+        if: failure()
+        run: |
+          echo '--- Emulator log ---'
+          tail -n 200 /tmp/emulator.log || true
+          echo '--- noVNC log ---'
+          tail -n 100 /tmp/novnc.log || true
+          echo '--- x11vnc log ---'
+          tail -n 100 /tmp/x11vnc.log || true
