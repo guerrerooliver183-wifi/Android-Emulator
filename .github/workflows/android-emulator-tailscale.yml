@@ -15,7 +15,7 @@ permissions:
 jobs:
   android-emulator:
     runs-on: ubuntu-latest
-    timeout-minutes: 340
+    timeout-minutes: 360
     env:
       DURATION_MINUTES: ${{ inputs.duration_minutes }}
       ANDROID_HOME: /opt/android-sdk
@@ -112,7 +112,7 @@ jobs:
           sleep 3
 
       - name: Connect runner to Tailscale
-        uses: tailscale/github-action@v3
+        uses: tailscale/github-action@v4
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
