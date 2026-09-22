@@ -20,7 +20,7 @@ adb tcpip 5555
 adb connect 127.0.0.1:5555 || true
 adb devices
 
-sudo tailscale serve --tcp=5555 tcp://127.0.0.1:5555 --yes
+sudo tailscale serve --bg --tcp=5555 //127.0.0.1:5555 --yes
 echo "Tailscale Serve status:"
 tailscale serve status
 
