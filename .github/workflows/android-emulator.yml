@@ -26,7 +26,7 @@ jobs:
       - name: Install VNC, noVNC, and Cloudflare Tunnel
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb x11vnc x11-utils python3-websockify libpulse0
+          sudo apt-get install -y xvfb x11vnc x11-utils python3-websockify libpulse0 pulseaudio pulseaudio-utils ffmpeg python3-websockets nginx
           git clone --depth 1 https://github.com/novnc/noVNC.git "$RUNNER_TEMP/noVNC"
           python3 - "$RUNNER_TEMP/noVNC/core/util/cursor.js" <<'PY'
           from pathlib import Path
@@ -38,7 +38,7 @@ jobs:
           new = '''const ua = navigator.userAgent || "";
           const isMobileUA = /Android|iPhone|iPad|iPod|Mobile/i.test(ua) ||
               (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-          const isDesktopUA = /Windows NT|Macintosh|Mac OS X|X11|Linux x86_64|Linux i686/i.test(ua) && !isMobileUA;
+          const isDesktopUA = /Windows|Macintosh|Mac OS X|X11|Linux|CrOS/i.test(ua) && !isMobileUA;
           const hideRemoteCursor = !isDesktopUA;
           const useFallback = !supportsCursorURIs || isTouchDevice;'''
           assert s.count(old) == 1
@@ -59,6 +59,53 @@ jobs:
           assert s.count(old) == 1
           p.write_text(s.replace(old, new))
           print("Configured noVNC cursor visibility from navigator.userAgent.")
+          PY
+          cat > "$RUNNER_TEMP/noVNC/audio-client.js" <<'JS'
+          (() => {
+              let started = false;
+              let context;
+              let nextTime = 0;
+              async function startAudio() {
+                  if (started) return;
+                  started = true;
+                  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                  if (!AudioContextClass) return;
+                  context = new AudioContextClass({sampleRate: 48000});
+                  try { await context.resume(); } catch (_) { return; }
+                  const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+                  const socket = new WebSocket(scheme + '//' + location.host + '/audio');
+                  socket.binaryType = 'arraybuffer';
+                  socket.onmessage = (event) => {
+                      const view = new DataView(event.data);
+                      const frames = Math.floor(view.byteLength / 4);
+                      if (!frames) return;
+                      const buffer = context.createBuffer(2, frames, 48000);
+                      const left = buffer.getChannelData(0);
+                      const right = buffer.getChannelData(1);
+                      for (let i = 0; i < frames; i++) {
+                          left[i] = view.getInt16(i * 4, true) / 32768;
+                          right[i] = view.getInt16(i * 4 + 2, true) / 32768;
+                      }
+                      const source = context.createBufferSource();
+                      source.buffer = buffer;
+                      source.connect(context.destination);
+                      if (nextTime < context.currentTime) nextTime = context.currentTime + 0.06;
+                      source.start(nextTime);
+                      nextTime += buffer.duration;
+                  };
+              }
+              for (const eventName of ['pointerdown', 'touchstart', 'keydown']) {
+                  window.addEventListener(eventName, startAudio, {once: true, capture: true});
+              }
+          })();
+          JS
+          python3 - "$RUNNER_TEMP/noVNC/vnc.html" <<'PY'
+          from pathlib import Path
+          import sys
+          p = Path(sys.argv[1])
+          html = p.read_text()
+          assert "</body>" in html
+          p.write_text(html.replace("</body>", '<script src="/audio-client.js"></script>\n</body>', 1))
           PY
           curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o "$RUNNER_TEMP/cloudflared.deb"
           sudo dpkg -i "$RUNNER_TEMP/cloudflared.deb"
@@ -90,8 +137,18 @@ jobs:
           done
           xdpyinfo -display :0 >/dev/null
 
+          export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-$RUNNER_TEMP/runtime}"
+          mkdir -p "$XDG_RUNTIME_DIR"
+          chmod 700 "$XDG_RUNTIME_DIR"
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=android_audio rate=48000 channels=2
+          pactl set-default-sink android_audio
+          pactl info
+
           export PATH="$ANDROID_HOME/emulator:$PATH"
-          emulator -avd ci-android -accel off -no-audio -no-boot-anim -gpu swiftshader_indirect -no-skin -scale 1.0 -no-snapshot -camera-back none -camera-front none > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          export ANDROID_I_WANT_MY_TCG=yes
+          export PULSE_SINK=android_audio
+          emulator -avd ci-android -accel off -no-boot-anim -gpu swiftshader_indirect -no-skin -scale 1.0 -no-snapshot -camera-back none -camera-front none > "$RUNNER_TEMP/emulator.log" 2>&1 &
           emulator_pid=$!
           booted=""
           for i in $(seq 1 120); do
@@ -107,7 +164,7 @@ jobs:
             sleep 5
           done
           if [ "$booted" != "1" ]; then
-            echo "Android emulator did not boot within 450 seconds; emulator log follows:"
+            echo "Android emulator did not boot within 600 seconds; emulator log follows:"
             cat "$RUNNER_TEMP/emulator.log"
             exit 1
           fi
@@ -115,8 +172,64 @@ jobs:
 
           x11vnc -display :0 -clip 380x680+0+0 -forever -shared -nopw -listen 127.0.0.1 -rfbport 5900 > "$RUNNER_TEMP/x11vnc.log" 2>&1 &
           vnc_pid=$!
-          python3 -m websockify --web "$RUNNER_TEMP/noVNC" 6080 127.0.0.1:5900 > "$RUNNER_TEMP/websockify.log" 2>&1 &
+          python3 -m websockify --web "$RUNNER_TEMP/noVNC" 6081 127.0.0.1:5900 > "$RUNNER_TEMP/websockify.log" 2>&1 &
           websockify_pid=$!
+          cat > "$RUNNER_TEMP/audio_bridge.py" <<'PY'
+          import asyncio
+          import websockets
+
+          async def handler(ws, path=None):
+              proc = await asyncio.create_subprocess_exec(
+                  "ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "pulse",
+                  "-i", "android_audio.monitor", "-ar", "48000", "-ac", "2",
+                  "-f", "s16le", "-acodec", "pcm_s16le", "pipe:1",
+                  stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+              try:
+                  while True:
+                      chunk = await proc.stdout.read(4096)
+                      if not chunk:
+                          break
+                      await ws.send(chunk)
+              except websockets.ConnectionClosed:
+                  pass
+              finally:
+                  if proc.returncode is None:
+                      proc.terminate()
+                      await proc.wait()
+
+          async def main():
+              async with websockets.serve(handler, "127.0.0.1", 8765, max_size=None):
+                  await asyncio.Future()
+
+          asyncio.run(main())
+          PY
+          python3 "$RUNNER_TEMP/audio_bridge.py" > "$RUNNER_TEMP/audio.log" 2>&1 &
+          audio_pid=$!
+          cat > "$RUNNER_TEMP/nginx.conf" <<NGINX
+          pid $RUNNER_TEMP/nginx.pid;
+          events { worker_connections 1024; }
+          http {
+            server {
+              listen 6080;
+              location /audio {
+                proxy_pass http://127.0.0.1:8765;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade \$http_upgrade;
+                proxy_set_header Connection "upgrade";
+                proxy_read_timeout 3600s;
+              }
+              location /websockify {
+                proxy_pass http://127.0.0.1:6081;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade \$http_upgrade;
+                proxy_set_header Connection "upgrade";
+                proxy_read_timeout 3600s;
+              }
+              location / { proxy_pass http://127.0.0.1:6081; }
+            }
+          }
+          NGINX
+          sudo nginx -c "$RUNNER_TEMP/nginx.conf"
           for i in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:6080/vnc.html >/dev/null; then break; fi
             sleep 1
@@ -135,9 +248,10 @@ jobs:
           echo "::notice title=Emulator URL::$URL/vnc.html?autoconnect=true&resize=scale"
           echo "Emulator browser URL (public, no password): $URL/vnc.html?autoconnect=true&resize=scale"
           echo "noVNC provides Fit to Screen scaling and Full Screen / Exit Full Screen toolbar controls."
+          echo "Android audio is streamed after the first user interaction in the browser."
           echo "Keep this workflow running to keep the emulator available. The URL is public and unauthenticated."
 
-          trap 'kill "$cloudflared_pid" "$websockify_pid" "$vnc_pid" "$emulator_pid" "$xvfb_pid" 2>/dev/null || true' EXIT
+          trap 'kill "$cloudflared_pid" "$audio_pid" "$websockify_pid" "$vnc_pid" "$emulator_pid" "$xvfb_pid" 2>/dev/null || true; sudo nginx -s quit -c "$RUNNER_TEMP/nginx.conf" 2>/dev/null || true; pulseaudio -k 2>/dev/null || true' EXIT
           while kill -0 "$emulator_pid" 2>/dev/null && kill -0 "$cloudflared_pid" 2>/dev/null; do
             sleep 30
             echo "Android emulator, VNC, and Cloudflare Quick Tunnel are running."
