@@ -45,6 +45,7 @@ jobs:
           done
           xdpyinfo -display :0 >/dev/null
 
+          export PATH="$ANDROID_HOME/emulator:$PATH"
           emulator -avd ci-android -no-audio -no-boot-anim -gpu swiftshader_indirect -skin 1080x1920 -no-snapshot -camera-back none -camera-front none > "$RUNNER_TEMP/emulator.log" 2>&1 &
           emulator_pid=$!
           booted=""
