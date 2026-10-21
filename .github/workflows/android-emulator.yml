@@ -61,7 +61,7 @@ jobs:
           fi
 
           export PATH="$ANDROID_HOME/emulator:$PATH"
-          emulator -avd ci-android -no-audio -no-boot-anim -gpu swiftshader_indirect -skin 1080x1920 -no-snapshot -camera-back none -camera-front none > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          emulator -avd ci-android -no-audio -no-boot-anim -gpu swiftshader_indirect -skin 480x854 -scale 1.0 -no-snapshot -camera-back none -camera-front none > "$RUNNER_TEMP/emulator.log" 2>&1 &
           emulator_pid=$!
           booted=""
           for i in $(seq 1 90); do
