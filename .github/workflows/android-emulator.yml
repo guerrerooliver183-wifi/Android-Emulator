@@ -1,0 +1,78 @@
+name: Android Emulator VNC
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  emulator:
+    name: Start Android Emulator with browser VNC
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Install Android SDK, NDK, and emulator
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        run: |
+          sdkmanager --install "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "emulator" "system-images;android-35;google_apis;x86_64"
+          sdkmanager --licenses <<<'y'
+
+      - name: Install VNC, noVNC, and Cloudflare Tunnel
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11vnc xterm python3-websockify
+          git clone --depth 1 https://github.com/novnc/noVNC.git "$RUNNER_TEMP/noVNC"
+          curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o "$RUNNER_TEMP/cloudflared.deb"
+          sudo dpkg -i "$RUNNER_TEMP/cloudflared.deb"
+
+      - name: Start Android emulator
+        run: |
+          echo "no" | avdmanager create avd --name ci-android --package "system-images;android-35;google_apis;x86_64" --device "pixel_6" --force
+          Xvfb :0 -screen 0 1280x800x24 -ac +extension RANDR > "$RUNNER_TEMP/xvfb.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/xvfb.pid"
+          export DISPLAY=:0
+          nohup emulator -avd ci-android -no-audio -no-boot-anim -gpu swiftshader_indirect -skin 1080x1920 -no-snapshot -camera-back none -camera-front none > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/emulator.pid"
+          adb wait-for-device
+          for i in $(seq 1 90); do
+            booted="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+            [ "$booted" = "1" ] && break
+            sleep 5
+          done
+          test "$(adb shell getprop sys.boot_completed | tr -d '\r')" = "1"
+          adb shell input keyevent 82 || true
+          sleep 3
+
+      - name: Start unauthenticated VNC and noVNC web client
+        run: |
+          export DISPLAY=:0
+          x11vnc -display :0 -forever -shared -nopw -listen 127.0.0.1 -rfbport 5900 > "$RUNNER_TEMP/x11vnc.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/x11vnc.pid"
+          python3 -m websockify --web "$RUNNER_TEMP/noVNC" 6080 127.0.0.1:5900 > "$RUNNER_TEMP/websockify.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/websockify.pid"
+          for i in $(seq 1 20); do curl -fsS http://127.0.0.1:6080/vnc.html >/dev/null && break; sleep 1; done
+          curl -fsS http://127.0.0.1:6080/vnc.html >/dev/null
+
+      - name: Open Cloudflare Quick Tunnel
+        run: |
+          cloudflared tunnel --no-autoupdate --url http://127.0.0.1:6080 > "$RUNNER_TEMP/cloudflared.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/cloudflared.pid"
+          for i in $(seq 1 60); do
+            URL="$(grep -Eo 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared.log" | head -n 1 || true)"
+            [ -n "$URL" ] && break
+            sleep 2
+          done
+          if [ -z "${URL:-}" ]; then cat "$RUNNER_TEMP/cloudflared.log"; exit 1; fi
+          echo "::notice title=Emulator URL::$URL/vnc.html?autoconnect=true&resize=scale"
+          echo "Emulator browser URL (public, no password): $URL/vnc.html?autoconnect=true&resize=scale"
+          echo "Keep this workflow running to keep the emulator available."
+
+      - name: Keep session alive
+        run: |
+          while kill -0 "$(cat "$RUNNER_TEMP/emulator.pid")" 2>/dev/null; do
+            sleep 30
+            echo "Android emulator and public Quick Tunnel are running."
+          done
