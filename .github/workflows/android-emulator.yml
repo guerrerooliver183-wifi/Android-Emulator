@@ -53,6 +53,13 @@ jobs:
           done
           xdpyinfo -display :0 >/dev/null
 
+          if [ -e /dev/kvm ]; then
+            sudo chmod a+rw /dev/kvm
+            ls -l /dev/kvm
+          else
+            echo "No /dev/kvm device is available on this runner."
+          fi
+
           export PATH="$ANDROID_HOME/emulator:$PATH"
           emulator -avd ci-android -no-audio -no-boot-anim -gpu swiftshader_indirect -skin 1080x1920 -no-snapshot -camera-back none -camera-front none > "$RUNNER_TEMP/emulator.log" 2>&1 &
           emulator_pid=$!
