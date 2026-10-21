@@ -34,7 +34,15 @@ jobs:
       - name: Run emulator and public browser VNC session
         run: |
           set -Eeuo pipefail
+          export ANDROID_AVD_HOME="$HOME/.android/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
           echo "no" | avdmanager create avd --name ci-android --package "system-images;android-35;google_apis;x86_64" --device "pixel_6" --force
+          if [ ! -f "$ANDROID_AVD_HOME/ci-android.ini" ]; then
+            echo "AVD file was not created in $ANDROID_AVD_HOME; listing AVDs and directory:"
+            avdmanager list avd || true
+            find "$HOME/.android" -maxdepth 3 -type f -print || true
+            exit 1
+          fi
 
           Xvfb :0 -screen 0 1280x1920x24 -ac +extension RANDR > "$RUNNER_TEMP/xvfb.log" 2>&1 &
           xvfb_pid=$!
