@@ -14,10 +14,12 @@ jobs:
     steps:
       - name: Install Android SDK, NDK, and emulator
         uses: android-actions/setup-android@v3
+        with:
+          accept-android-sdk-licenses: false
 
       - name: Install SDK packages
         run: |
-          sdkmanager --licenses <<<'y'
+          yes | sdkmanager --licenses
           sdkmanager --install "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "emulator" "system-images;android-35;google_apis;x86_64"
 
       - name: Install VNC, noVNC, and Cloudflare Tunnel
