@@ -26,7 +26,7 @@ jobs:
       - name: Install VNC, noVNC, and Cloudflare Tunnel
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb x11vnc x11-utils python3-websockify libpulse0
+          sudo apt-get install -y xvfb x11vnc x11-utils python3-websockify libpulse0 xdotool
           git clone --depth 1 https://github.com/novnc/noVNC.git "$RUNNER_TEMP/noVNC"
           curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o "$RUNNER_TEMP/cloudflared.deb"
           sudo dpkg -i "$RUNNER_TEMP/cloudflared.deb"
@@ -43,6 +43,11 @@ jobs:
             find "$HOME/.android" -maxdepth 3 -type f -print || true
             exit 1
           fi
+          cat >> "$ANDROID_AVD_HOME/ci-android.avd/config.ini" <<'AVD_CONFIG'
+          hw.lcd.width=480
+          hw.lcd.height=854
+          hw.lcd.density=160
+          AVD_CONFIG
 
           Xvfb :0 -screen 0 480x854x24 -ac +extension RANDR > "$RUNNER_TEMP/xvfb.log" 2>&1 &
           xvfb_pid=$!
@@ -61,8 +66,10 @@ jobs:
           fi
 
           export PATH="$ANDROID_HOME/emulator:$PATH"
-          emulator -avd ci-android -no-audio -no-boot-anim -gpu swiftshader_indirect -skin 480x854 -scale 1.0 -no-snapshot -camera-back none -camera-front none > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          emulator -avd ci-android -no-audio -no-boot-anim -gpu swiftshader_indirect -no-skin -scale 1.0 -no-snapshot -camera-back none -camera-front none > "$RUNNER_TEMP/emulator.log" 2>&1 &
           emulator_pid=$!
+          sleep 3
+          xdotool key Return || true
           booted=""
           for i in $(seq 1 90); do
             if ! kill -0 "$emulator_pid" 2>/dev/null; then
