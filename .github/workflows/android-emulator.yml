@@ -26,8 +26,40 @@ jobs:
       - name: Install VNC, noVNC, and Cloudflare Tunnel
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb x11vnc x11-utils python3-websockify libpulse0 xdotool
+          sudo apt-get install -y xvfb x11vnc x11-utils python3-websockify libpulse0
           git clone --depth 1 https://github.com/novnc/noVNC.git "$RUNNER_TEMP/noVNC"
+          python3 - "$RUNNER_TEMP/noVNC/core/util/cursor.js" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          old = "const useFallback = !supportsCursorURIs || isTouchDevice;"
+          new = '''const ua = navigator.userAgent || "";
+          const isMobileUA = /Android|iPhone|iPad|iPod|Mobile/i.test(ua) ||
+              (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+          const isDesktopUA = /Windows NT|Macintosh|Mac OS X|X11|Linux x86_64|Linux i686/i.test(ua) && !isMobileUA;
+          const hideRemoteCursor = !isDesktopUA;
+          const useFallback = !supportsCursorURIs || isTouchDevice;'''
+          assert s.count(old) == 1
+          s = s.replace(old, new)
+          pattern = r"(?m)^ {8}if \(useFallback\) \{\n {12}this\._updatePosition\(\);\n {8}\} else \{\n {12}let url = this\._canvas\.toDataURL\(\);\n {12}this\._target\.style\.cursor = [^\n]+\n {8}\}"
+          replacement = '''        if (hideRemoteCursor) {
+              this._hideCursor();
+          } else if (useFallback) {
+              this._updatePosition();
+          } else {
+              let url = this._canvas.toDataURL();
+              this._target.style.cursor = 'url(' + url + ')' + hotx + ' ' + hoty + ', default';
+          }'''
+          s, n = re.subn(pattern, lambda _: replacement, s)
+          assert n == 1, f"cursor change block replacements: {n}"
+          old = "    _shouldShowCursor(target) {\n        if (!target) {"
+          new = "    _shouldShowCursor(target) {\n        if (hideRemoteCursor || !target) {"
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, new))
+          print("Configured noVNC cursor visibility from navigator.userAgent.")
+          PY
           curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o "$RUNNER_TEMP/cloudflared.deb"
           sudo dpkg -i "$RUNNER_TEMP/cloudflared.deb"
 
@@ -58,18 +90,11 @@ jobs:
           done
           xdpyinfo -display :0 >/dev/null
 
-          if [ -e /dev/kvm ]; then
-            sudo chmod a+rw /dev/kvm
-            ls -l /dev/kvm
-          else
-            echo "No /dev/kvm device is available on this runner."
-          fi
-
           export PATH="$ANDROID_HOME/emulator:$PATH"
-          emulator -avd ci-android -no-audio -no-boot-anim -gpu swiftshader_indirect -no-skin -scale 1.0 -no-snapshot -camera-back none -camera-front none > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          emulator -avd ci-android -accel off -no-audio -no-boot-anim -gpu swiftshader_indirect -no-skin -scale 1.0 -no-snapshot -camera-back none -camera-front none > "$RUNNER_TEMP/emulator.log" 2>&1 &
           emulator_pid=$!
           booted=""
-          for i in $(seq 1 90); do
+          for i in $(seq 1 120); do
             if ! kill -0 "$emulator_pid" 2>/dev/null; then
               echo "Android emulator exited before boot completed; emulator log follows:"
               cat "$RUNNER_TEMP/emulator.log"
@@ -86,8 +111,6 @@ jobs:
             cat "$RUNNER_TEMP/emulator.log"
             exit 1
           fi
-          xdotool key Return || true
-          sleep 1
           adb shell input keyevent 82 || true
 
           x11vnc -display :0 -clip 380x680+0+0 -forever -shared -nopw -listen 127.0.0.1 -rfbport 5900 > "$RUNNER_TEMP/x11vnc.log" 2>&1 &
